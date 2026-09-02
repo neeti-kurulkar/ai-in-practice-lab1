@@ -1,49 +1,65 @@
 # Lab 1 — The Reliable Extractor · Report
 
-`gemini` / `SMALL` = `gemini-3.5-flash-lite` ($0.30 / $2.50 per Mtok), `temperature=0`, cache on. Iterated on **dev**; **test run once** (`reports/lab1_test.json`).
+**Setup.** Model `gemini-3.5-flash-lite` (the `SMALL` tier), `temperature=0`, prompt cache on. Prices: $0.30 per million input tokens, $2.50 per million output. All tuning was done on the 60-ticket dev set. The 120-ticket test set was run once, and that run is saved in `reports/lab1_test.json`.
 
-## Part A — how v0 fails (`v0_naive.py --n 40`)
+## Part A — how the naive version fails
 
-| Failure mode | / 40 | T1 §3 |
+`v0_naive.py` is the first thing you would write: one prompt, then `json.loads` on the reply. Run over 40 dev tickets, here is how it breaks.
+
+| What went wrong | Tickets (of 40) | Taxonomy (T1 §3) |
 |---|---|---|
-| Not valid JSON at all | 0 | #5 |
-| JSON wrapped in a markdown fence | **40** | #5 malformed output |
-| Extra prose before/after the JSON | 0 | #5 |
-| Valid JSON, missing a required field | 0 | #6 |
-| Category outside the allowed set | **40** | #6 schema violation |
-| Urgency as a string, not an int | **40** | #6 (type) |
-| Policy number invented | 0 | #8 hallucination |
-| Unhandled exception | 0 | — |
+| Reply not valid JSON at all | 0 | #5 |
+| JSON wrapped in a Markdown code fence | 40 | #5 malformed output |
+| Extra prose before or after the JSON | 0 | #5 |
+| Valid JSON but a required field missing | 0 | #6 |
+| `category` value outside the allowed list | 40 | #6 schema violation |
+| `urgency` returned as text instead of a number | 40 | #6 wrong type |
+| `policy_number` invented | 0 | #8 hallucination |
+| Crash (unhandled exception) | 0 | — |
 
-**Arc:** `0/40` parsed by bare `json.loads` → `40/40` after a one-line tolerant unwrap → **still `0/40` clean**. One trivial parser bug hid two content defects (in every record) behind it. v0 cost $0.0074 / 40, p95 1292 ms.
-**Two rows that don't fit the model taxonomy:** *unhandled exception* is a missing `try` in our code, not a model behaviour; *urgency-as-string* is not a distinct mode but the tell that #5 and #6 are one event — a fenced blob whose contents also break the schema.
+The same three things happen on every ticket: the reply is fenced, the category is off the allowed list, and urgency comes back as a word. Nothing else ever goes wrong — the model never invents a policy number and never drops a field.
 
-## Variant comparison
+The fence alone means `json.loads` parses **0 of 40** replies. Stripping the fence first (a one-line change) gets all 40 to parse, but **still 0 of 40 are fully correct**, because the category and urgency problems were hidden behind the parse error the whole time. You cannot measure output you cannot parse. The run cost $0.0074, p95 latency 1292 ms.
 
-| | v0 | **B** (dev, n=60) | **C** (dev, n=60) | **C** (test, n=120) |
+Two of the rows above are not the model misbehaving. The **crash** row is a missing `try` in our own code. The **urgency-as-text** row is not a separate failure — it is the sign that the fence problem and the schema problem are one event: a fenced blob whose contents also break the schema.
+
+## Part B and Part C compared
+
+**B** makes one model call and checks the reply against the full 8-field schema. If anything fails, it returns a record marked for human review instead of raising an error.
+
+**C** is the same, except two fields — `policy_number` and `contains_pii` — are no longer asked of the model. They are found in code with a regex, and the schema sent to the model drops those two fields.
+
+| | v0 | B (dev, 60) | C (dev, 60) | C (test, 120) |
 |---|---|---|---|---|
-| schema_valid | 0 / 40 | 1.000 | 1.000 | **1.000** |
-| Field accuracy | — | 0.9095 | 0.9062 | **0.9156** |
-| Record accuracy (all 8) | 0.00 | 0.4667 | 0.4500 | **0.5250** |
-| Cost, full run | $0.0074 | $0.0458 ¹ | $0.0381 | **$0.0761** |
-| Cost per ticket | $0.000185 | $0.000763 | $0.000635 | $0.000634 |
-| p95 latency | 1292 ms | ~1337 ms ¹ | 1473 ms | **1389 ms** |
-| needs_review / unhandled exc. | — / 0 | 0.000 / 0 | 0.017 / 0 | **0.000 / 0** |
+| Valid records | 0 / 40 | 60 / 60 | 60 / 60 | 120 / 120 |
+| Field accuracy | — | 0.910 | 0.906 | 0.916 |
+| Whole-record accuracy (all 8 right) | 0.00 | 0.467 | 0.450 | 0.525 |
+| Cost, whole run | $0.0074 | $0.046 | $0.038 | $0.076 |
+| Cost per ticket | $0.00019 | $0.00076 | $0.00063 | $0.00063 |
+| p95 latency | 1292 ms | ~1337 ms | 1473 ms | 1389 ms |
+| Records flagged for review / crashes | — / 0 | 0 / 0 | 1 / 0 | 0 / 0 |
 
-¹ B-dev save-run was cache-served; cost from the token ledger (94,678 in / 6,965 out), p95 from the earlier partial live run.
+The B dev cost is computed from the token counts (94,678 in, 6,965 out) because that run was served from cache; its p95 is from an earlier live partial run.
 
-**B → C (same 60 dev tickets):** input tokens −14 %, output −22 %, **cost/ticket −17 %**. Field accuracy −0.003, record −0.017 — inside noise at n=60. `policy_number` and `contains_pii` move from ~1.000-by-model to exact-and-auditable **in code**, at lower cost. **Part C finding: cost falls, accuracy holds.**
+Comparing B and C on the same 60 dev tickets: moving two fields into code cut input tokens by 14%, output tokens by 22%, and cost per ticket by 17%. Field accuracy changed by −0.003 and whole-record accuracy by −0.017, both within the run-to-run noise at 60 tickets. The two fields that moved are now computed by a rule you can read and check, instead of trusted to the model. **Part C's result: cost goes down, accuracy holds.**
 
-## Per-field & category confusion (test, n=120)
+Against the assignment targets, the test run passes five of six: valid records 1.00, field accuracy 0.9156 (target 0.90), cost $0.076 (target $0.15), p95 1389 ms (target 4000 ms), zero crashes. It misses whole-record accuracy: 0.525 against a target of 0.55, left as measured. The next two sections are why.
 
-| field | acc | | field | acc |
+## Per-field accuracy and the category confusion matrix
+
+Accuracy by field on the 120-ticket test run:
+
+| Field | Accuracy | | Field | Accuracy |
 |---|---|---|---|---|
-| urgency | **0.667** | | category | 0.933 |
-| sentiment | **0.808** | | contains_pii | 1.000 |
-| escalate | 0.917 | | language / policy_number / product | 1.000 |
+| urgency | 0.667 | | category | 0.933 |
+| sentiment | 0.808 | | contains_pii | 1.000 |
+| escalate | 0.917 | | language, policy_number, product | 1.000 |
+
+Two fields carry all the loss: urgency and sentiment. The rest are 0.917 or better, and four are perfect.
+
+The category confusion matrix (rows are the correct answer, columns are what the model predicted; a dot means zero):
 
 ```
-category confusion   rows = gold, cols = predicted
               billing claims complaint information policy_change technical
 billing          16      .        .          .           .           .
 claims            .     21       .          .           .           .
@@ -53,32 +69,24 @@ policy_change     .      .       .          .          22           .
 technical         .      .       .          .           .          23
 ```
 
-**All 8 category errors sit on one boundary — complaint / information → `claims`** (the boundary `data/README.md` flags); zero errors elsewhere. **Urgency errors are ±1, boundary-adjacent, not scattered** — the field is mis-*calibrated*, not broken.
+Every category error — 8 of them — is on one seam: `complaint` or `information` tickets predicted as `claims`. No other pair is ever confused, and the data README already flags this boundary as the ambiguous one. The urgency errors are all off by exactly one step and sit next to a threshold, so the field is mis-calibrated rather than broken.
 
-## Top three error clusters (dev + test failures)
+## Top three error clusters
 
-1. **Urgency 1↔2 / 2↔3 boundaries misplaced (~18 of ~40 test urgency errors).** Model rates "send my 80D certificate" as **1** (gold **2** — needs a generated document), "download my e-card" as **2** (gold **1** — self-service), "app crashes on upload" as **3** (gold **2** — a defect, not "stuck"). **Fix:** 3–4 few-shot pairs straddling each boundary + open the field description with *"answerable without opening the customer's record?"*. **Worth: highest** — urgency gates ~40 % of imperfect records; 0.667 → ~0.80 lifts record accuracy ~0.525 → ~0.60.
-2. **Hinglish / emoji boilerplate read as a deadline and as frustration (~8 urgency + ~10 sentiment errors).** "Jaldi karo" / "kripya" on first-time requests trips the same-day modifier and flips `sentiment` to `frustrated`; emoji sway it (T0060 "…AYUSH? 😡" → `angry`, gold `neutral`). **Fix:** one description clause + 2 examples. **Worth: medium**, ~0.03–0.05 on both fields.
-3. **claims / complaint boundary (all 8 category errors + ~6 sentiment).** "Network hospital refused cashless saying *you* owe them" → gold `complaint` (Aurora's conduct), predicted `claims`. "Thanks for settling my claim, confirming my NCB" → gold `information`, predicted `claims`. **Fix:** add one `complaint` example where a claim word appears but Aurora's conduct is the subject, and one `information` example after a resolved claim. **Worth: cheap**, category 0.933 → ~0.97.
+1. **Urgency thresholds in the wrong place** — about 18 of the ~40 urgency errors on test. The model rates "please send my 80D tax certificate" as 1 when it should be 2 (a document has to be generated), "let me download my e-card" as 2 when it should be 1 (self-service), and "the app crashes when I upload" as 3 when it should be 2 (a bug, not an emergency). **Fix:** add 3–4 worked examples that sit right on each threshold, and start the field description with the test "can this be answered without opening the customer's file?" **Payoff: largest.** Urgency is wrong in roughly 40% of the imperfect records; lifting it from 0.667 to about 0.80 would raise whole-record accuracy from about 0.525 to about 0.60, past the target.
 
-## D4.5 — economic argument
+2. **Polite Hinglish and emoji read as urgency and anger** — about 8 urgency errors and 10 sentiment errors. "Jaldi karo" and "kripya" on a routine first request trigger the same-day flag and flip sentiment to frustrated; an emoji does the same (ticket T0060, "...AYUSH? 😡", is marked angry when it should be neutral). **Fix:** one sentence in each field's description plus two examples. **Payoff: medium**, roughly 0.03–0.05 on each field.
 
-- Measured (C, test): **$0.0761 / 120 = $0.000634 per ticket** (≈ ₹0.053 at ₹83.5/$).
-- 10,000 tickets/day × 365 → **≈ $2,310 / year**.
-- Human baseline: 40 s × ₹300/h = **₹3.33 ≈ $0.040 / ticket** → **≈ $146,000 / year** at the same volume → model **~63× cheaper** per ticket.
-- **Break-even record accuracy (cost only):** worth deploying when `c_llm + (1−r)·c_human < c_human` ⇒ `r > c_llm / c_human = 0.053 / 3.33 ≈` **1.6 %**. At r = 0.525 we are ~30× above it — **cost is not the binding constraint.**
-- **What binds instead:** *review capacity.* At r = 0.525, 4,750 records/day carry ≥1 wrong field — a ~52 % cut in agent load **only if those records can be identified**, and they can't: `needs_human_review` fired **0 times** on test. Real saving < 52 % until the system flags its own low-confidence cases.
+3. **The claims / complaint boundary** — all 8 category errors, plus about 6 sentiment errors. "The network hospital refused cashless and said you still owe them" is a complaint about Aurora's handling, but the model sees claim words and says `claims`. "Thanks for settling my claim, just confirming my no-claim bonus" is information, but again the model says `claims`. **Fix:** add one complaint example where claim words appear but the subject is Aurora's conduct, and one information example that follows a settled claim. **Payoff: cheap**, category from 0.933 to about 0.97.
+
+## The economic argument (step 4.5)
+
+- Measured on the test run: $0.076 for 120 tickets, so **$0.00063 per ticket** (about ₹0.053 at ₹83.5 to the dollar).
+- At 10,000 tickets a day, that is about **$2,300 a year** to run.
+- A person doing the same work takes about 40 seconds a ticket; at ₹300 an hour that is ₹3.33, about **$0.040 a ticket**, or about **$146,000 a year** for the same volume. The model is roughly **60 times cheaper** per ticket.
+- **Break-even:** the model is worth running when its cost, plus the cost of people fixing the records it gets wrong, is less than paying people to do everything: `c_llm + (1 − r) · c_human < c_human`. That simplifies to `r > c_llm / c_human`, which is `0.053 / 3.33`, about **1.6%**. We are at 52.5% whole-record accuracy, roughly 30 times above the line. On cost alone this is an easy yes.
+- **What actually limits the saving** is not money but review capacity. At 52.5% accuracy, about 4,750 of 10,000 daily records have at least one wrong field. That is only a ~52% cut in agent workload *if you can tell which records those are* — and right now you cannot, because the review flag fired **0 times** on the test set. The real saving stays below 52% until the system can flag its own shaky answers.
 
 ## One thing that didn't work
 
-Shrinking the schema in Part C (dropping `policy_number`, `contains_pii`) was expected to be output-only and accuracy-neutral. On dev, **`sentiment` fell 0.900 → 0.833** (4 / 60 flipped) B → C, with no change to that field or its description. The JSON Schema is part of the prompt, so removing two unrelated fields changed the context the model conditioned on. Net field accuracy still moved only −0.003 and the cost win is real, so C stands — but "delete fields from the schema" is a prompt change, not a free refactor, and needs the same before/after eval as any prompt edit.
-
-## Targets (test, n=120, variant C, single run)
-
-Schema validity **1.000** ✅ · Field accuracy **0.9156** ✅ (≥ 0.90) · Cost **$0.0761** ✅ (≤ $0.15) · p95 **1389 ms** ✅ (≤ 4000) · Unhandled exceptions **0** ✅ · **Record accuracy 0.525 ❌** (≥ 0.55, −0.025).
-
-**5 / 6.** The miss is `record_accuracy`, driven entirely by `urgency` (0.667) and `sentiment` (0.808); the other six fields are ≥ 0.933, four exact. Left as measured — the cluster analysis above is the deliverable, not a patched number. Test came out *above* dev (record 0.525 vs 0.450); at n=60 that gap is sampling noise, so treat dev as the conservative estimate.
-
-**Environment.** Gemini free-tier key was rate-limited (`RESOURCE_EXHAUSTED` / `GenerateRequestsPerMinute`); runs were paced to 1 worker with a fixed inter-call delay. Model outputs and per-call latencies (measured around the API call, from the budget ledger) are unaffected.
-
-**Code change.** `extract.py` only, 3 lines: `extract_b` / `extract_c` now `except Exception` (not just `StructuredOutputError`), so transport / rate-limit / budget failures also degrade to a `needs_human_review` record — this holds schema-validity at 1.000 and unhandled exceptions at 0 on the full test split. `review_reason` records the exception type. Schema, prompt, deterministic extraction and business rules unchanged.
+Removing `policy_number` and `contains_pii` from the schema in Part C was supposed to change only the output, not the accuracy. It did not: on dev, sentiment accuracy dropped from 0.900 to 0.833 (4 of 60 tickets changed), even though the sentiment field and its description were untouched. The schema is part of the prompt, so taking two fields out changed the text the model was reading. Overall field accuracy still moved only −0.003 and the cost saving is real, so C stands — but the lesson is that trimming the schema is a prompt change and needs a before-and-after check like any other prompt change.
