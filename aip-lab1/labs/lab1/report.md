@@ -6,16 +6,16 @@
 
 `v0_naive.py` is the first thing you would write: one prompt, then `json.loads` on the reply. Run over 40 dev tickets, here is how it breaks.
 
-| What went wrong | Tickets (of 40) | Taxonomy (T1 §3) |
-|---|---|---|
-| Reply not valid JSON at all | 0 | #5 |
-| JSON wrapped in a Markdown code fence | 40 | #5 malformed output |
-| Extra prose before or after the JSON | 0 | #5 |
-| Valid JSON but a required field missing | 0 | #6 |
-| `category` value outside the allowed list | 40 | #6 schema violation |
-| `urgency` returned as text instead of a number | 40 | #6 wrong type |
-| `policy_number` invented | 0 | #8 hallucination |
-| Crash (unhandled exception) | 0 | — |
+| What went wrong | Tickets (of 40) | Example ticket | Taxonomy (T1 §3) |
+|---|---|---|---|
+| Reply not valid JSON at all | 0 | — | #5 |
+| JSON wrapped in a Markdown code fence | 40 | T0054 (all 40) | #5 malformed output |
+| Extra prose before or after the JSON | 0 | — | #5 |
+| Valid JSON but a required field missing | 0 | — | #6 |
+| `category` value outside the allowed list | 40 | T0054 (all 40) | #6 schema violation |
+| `urgency` returned as text instead of a number | 40 | T0054 (all 40) | #6 wrong type |
+| `policy_number` invented | 0 | — | #8 hallucination |
+| Crash (unhandled exception) | 0 | — | — |
 
 The same three things happen on every ticket: the reply is fenced, the category is off the allowed list, and urgency comes back as a word. Nothing else ever goes wrong — the model never invents a policy number and never drops a field.
 
